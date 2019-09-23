@@ -1,0 +1,1 @@
+https://github.com/Yorko/mlcourse_open/tree/master/jupyter_notebooks/topic02_visual_analysis

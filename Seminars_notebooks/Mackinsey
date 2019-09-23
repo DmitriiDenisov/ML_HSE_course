@@ -1,0 +1,932 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "//anaconda/lib/python2.7/site-packages/sklearn/cross_validation.py:41: DeprecationWarning: This module was deprecated in version 0.18 in favor of the model_selection module into which all the refactored classes and functions are moved. Also note that the interface of the new CV iterators are different from that of this module. This module will be removed in 0.20.\n",
+      "  \"This module will be removed in 0.20.\", DeprecationWarning)\n",
+      "//anaconda/lib/python2.7/site-packages/sklearn/grid_search.py:42: DeprecationWarning: This module was deprecated in version 0.18 in favor of the model_selection module into which all the refactored classes and functions are moved. This module will be removed in 0.20.\n",
+      "  DeprecationWarning)\n"
+     ]
+    }
+   ],
+   "source": [
+    "import pandas as pd\n",
+    "import numpy as np\n",
+    "from sklearn.feature_selection import VarianceThreshold, SelectKBest, f_classif\n",
+    "from sklearn.metrics import roc_auc_score\n",
+    "from sklearn.metrics import r2_score, make_scorer\n",
+    "from sklearn.model_selection import cross_val_score\n",
+    "from sklearn.model_selection import train_test_split\n",
+    "from sklearn.linear_model import LogisticRegression\n",
+    "from sklearn.svm import SVC\n",
+    "from sklearn.ensemble import RandomForestClassifier\n",
+    "import matplotlib.pyplot as plt\n",
+    "#import xgboost as xgb\n",
+    "import time\n",
+    "from sklearn.grid_search import GridSearchCV\n",
+    "from sklearn.feature_selection import SelectFromModel\n",
+    "pd.set_option('display.max_columns', 50)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 289,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "def fill_na(df):\n",
+    "    #колонки, в которых будем убирвать наны\n",
+    "    cols = df.columns[~df.columns.isin(['offer_class_group','ride_type_desc', 'weekday_key', 'offer_gk'])]\n",
+    "    #замена NAN на mean\n",
+    "    #d = {-1: np.mean(a)}\n",
+    "    df[cols] = df[cols].apply(lambda x: x.replace({-1: np.mean(x)}), axis = 0)\n",
+    "    \n",
+    "    return df"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "def def_cat_est_cost(a):\n",
+    "    if (0 <= a) & (a < 100):\n",
+    "        return 'very cheap'\n",
+    "    if (100<= a) & (a < 250):\n",
+    "        return 'cheap'\n",
+    "    if (250 <= a) & (a < 600):\n",
+    "        return 'moderate'\n",
+    "    if (600 <= a) & (a < 1200):\n",
+    "        return 'expensive'\n",
+    "    if (a >= 1200):\n",
+    "        return 'very expensive'"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 324,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "def prepare_DF(df):\n",
+    "    cols = df.columns[~df.columns.isin(['offer_class_group','ride_type_desc', 'day_part', 'weekday_key', 'cat_est_cost'])]\n",
+    "    #Нормировка\n",
+    "    #drop: offer_gk, order_gk, \n",
+    "    #norm: driver_latitude, driver_longitude, origin_order_latitude, origin_order_longitude, distance_km, duration_min\n",
+    "    \n",
+    "    df[['driver_latitude', 'driver_longitude', 'origin_order_latitude', \n",
+    "                   'origin_order_longitude', 'distance_km', 'duration_min', 'all_distance']] = df[['driver_latitude', 'driver_longitude', 'origin_order_latitude', \n",
+    "                   'origin_order_longitude', 'distance_km', 'duration_min', 'all_distance']].apply(lambda x: x/x.max(), axis=0)\n",
+    "    \n",
+    "    #dummies\n",
+    "    dummies_day_weekend = pd.get_dummies(df[['day_part', 'weekday_key']])\n",
+    "    dummies_class = pd.get_dummies(df['offer_class_group'], prefix='Class')\n",
+    "    dummies_ride = pd.get_dummies(df['ride_type_desc'], prefix='ride')\n",
+    "    df = df.drop(['offer_class_group', 'ride_type_desc', 'day_part', 'weekday_key', 'cat_est_cost', 'offer_gk', 'order_gk'], axis = 1)#!!!!!!!\n",
+    "    X = pd.concat([df, dummies_class, dummies_ride, dummies_day_weekend], axis=1)\n",
+    "\n",
+    "    return X"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 325,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "def add_features(df):\n",
+    "    #расстояние от водилы до пассажира\n",
+    "    df['distance_to_passenger'] = np.sqrt((df['driver_latitude'] - df['origin_order_latitude']) ** 2 + (df['driver_longitude'] - df['origin_order_longitude']) **2)\n",
+    "    #расстояние до итогового пункта\n",
+    "    df['all_distance'] = df['distance_to_passenger'] + df['distance_km']\n",
+    "    #время до пассажира: t = S / V\n",
+    "    v = df['distance_km'] / (1.0 * df['duration_min']) #!!!\n",
+    "    #df['time_to_passanger'] = df['distance_to_passenger'] / (1.0 * v) #!!!\n",
+    "    #время на всю поездку\n",
+    "    #df['all_time'] = df['time_to_passanger'] + df['duration_min']\n",
+    "    #оценочная стоимость поездки. По формуле p + g * (a * time + b * distance)\n",
+    "    #здесь g-коэффициент, зависящий от пробок, a - стоимость минуты, b - стоимость километра, p - посадка\n",
+    "    p = {'Economy': 97, 'Standard': 50, 'Premium': 299, 'VIP': 699, 'VIP+': 800,\n",
+    "        'Kids': 99, 'XL': 299, 'Delivery': 600, 'Test': 150}\n",
+    "    g = {0:1, 1:1, 2:1, 3:1, 4: 1, 5:1, 6:1, 7:1, 8: 1.4, \n",
+    "         9: 1.9, 10: 1.5, 11: 1, 12: 1, 13:1.1, 14:1, 15:1, 16:1,\n",
+    "         17:1.3, 18:1.7, 19:1.5, 20:1.1, 21:1, 22:1, 23: 1}\n",
+    "    a = {'Economy': 7, 'Standard': 13, 'Premium': 20, 'VIP': 25, 'VIP+': 35,\n",
+    "        'Kids': 22, 'XL': 25, 'Delivery': 0, 'Test': 13}\n",
+    "    b = {'Economy': 7, 'Standard': 11, 'Premium': 15, 'VIP': 55, 'VIP+': 65,\n",
+    "        'Kids': 0, 'XL': 15, 'Delivery': 0, 'Test': 13}\n",
+    "    df['Est_cost'] = df['offer_class_group'].map(p) + df['hour_key'].map(g) * (df['offer_class_group'].map(a) * \n",
+    "                        df['duration_min'] + df['offer_class_group'].map(b) * df['distance_km'])\n",
+    "    \n",
+    "    #Разделение на утро/день/ночь/вечер\n",
+    "    r ={0:'night', 1:'night', 2: 'night', 3:'night', 4:'night', 5:'night', 6:'night', 7:'morning', 8:'morning', 9:'morning', \n",
+    "    10: 'morning', 11: 'morning', 12: 'day', 13:'day', 14:'day', 15:'day', 16:'day', 17:'day', 18: 'evening', \n",
+    "     19:'evening', 20:'evening', 21:'evening', 22:'evening', 23:'night'}\n",
+    "    df['day_part'] = df['hour_key'].map(r)\n",
+    "    \n",
+    "    #Разделение дешевая/дорогая поездка\n",
+    "    df['cat_est_cost'] = df['Est_cost'].map(def_cat_est_cost)\n",
+    "    \n",
+    "    return df"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 326,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "def Bayessian(df, option):\n",
+    "    feature = option[0]\n",
+    "    level = option[1]\n",
+    "    if level == 1: \n",
+    "        #вероятность P(1 | feature)\n",
+    "        df_new = pd.read_csv('CAX_TrainingData_McK.csv')\n",
+    "        A = pd.crosstab(df_new[feature], df_new['driver_response'])\n",
+    "        A['Prob_for_' + str(feature)] = A[1] / (1.0 * (A[0] + A[1]))\n",
+    "        s = A['Prob_for_' + str(feature)].to_dict()\n",
+    "        \n",
+    "        return s\n",
+    "        #df['Prob_for_driver_id'] = df['driver_gk'].map(s)\n",
+    "    if level == 2:\n",
+    "        #df_new = pd.read_csv('CAX_TrainingData_McK.csv')\n",
+    "        #вероятность P(1 | feature, id_driver) - individual\n",
+    "        df_new = pd.concat([df, Y], axis=1)\n",
+    "        grouped = df_new[['driver_gk', feature, 'driver_response']].groupby([feature,'driver_gk']).agg(['sum', 'count'])\n",
+    "        grouped.add_suffix('_Count').reset_index()\n",
+    "        grouped['Proba_individual' + str(feature)] = grouped['driver_response']['sum'] / (1.0 * grouped['driver_response']['count'])\n",
+    "        C = grouped.add_suffix('').reset_index()\n",
+    "        D = C[['driver_gk', feature, 'Proba_individual' + str(feature)]]\n",
+    "        D.columns = D.columns.droplevel(1)\n",
+    "    \n",
+    "        d = D.groupby(feature).apply(lambda x: x.set_index('driver_gk')['Proba_individual' + str(feature)].to_dict()).to_dict()\n",
+    "        return d\n",
+    "        #new_values = df.apply(lambda row: d[row[feature]][row['driver_gk']], axis = 1)\n",
+    "        #df['Proba_individual' + str(feature)] = new_values"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 327,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "def fun(diction, row, parametr):\n",
+    "    try: \n",
+    "        return diction[row[parametr]][row['driver_gk']] \n",
+    "    except KeyError: \n",
+    "        return 0.5"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 328,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "def add_pairs_bayess(df):\n",
+    "    df['pair_id_and_class'] = df['Prob_for_driver_gk'] * df['Proba_individual_offer_class_group'] #!!!!\n",
+    "    df['pair_id_and_daytime'] = df['Prob_for_driver_gk'] * df['Proba_individual_day_part']\n",
+    "    df['pair_id_and_ridetype'] = df['Prob_for_driver_gk'] * df['Proba_individual_ride_type_desc']\n",
+    "    df['pair_id_and_day_week'] = df['Prob_for_driver_gk'] * df['Proba_individual_weekday_key']\n",
+    "    \n",
+    "    df['pair_class_and_daytime'] = df['Proba_individual_offer_class_group'] * df['Proba_individual_day_part']\n",
+    "    df['pair_class_and_ridetype'] = df['Proba_individual_offer_class_group'] * df['Proba_individual_ride_type_desc']\n",
+    "    df['pair_class_and_day_week'] = df['Proba_individual_offer_class_group'] * df['Proba_individual_weekday_key']\n",
+    "    \n",
+    "    df['pair_daytime_and_ridetype'] = df['Proba_individual_day_part'] * df['Proba_individual_ride_type_desc']\n",
+    "    df['pair_daytime_and_day_week'] = df['Proba_individual_day_part'] * df['Proba_individual_weekday_key']\n",
+    "    \n",
+    "    df['pair_ridetype_and_day_week'] = df['Proba_individual_ride_type_desc'] * df['Proba_individual_weekday_key']\n",
+    "    return df"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 329,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "def modify_test_sample(df_Kaggle):\n",
+    "    #должны добавить и выкинуть те же фичи, что мы использовали при построении Train'a\n",
+    "    df_new = pd.read_csv('CAX_TrainingData_McK.csv')\n",
+    "    df_new[\"weekday_key\"] = df_new[\"weekday_key\"].astype('category')\n",
+    "    df_new = df_new.drop('driver_response', axis = 1)\n",
+    "    df_new = fill_na(df_new)\n",
+    "    df_new = add_features(df_new)\n",
+    "    \n",
+    "    df_Kaggle[\"weekday_key\"] = df_Kaggle[\"weekday_key\"].astype('category')\n",
+    "    df_Kaggle = df_Kaggle.drop('driver_response', axis = 1)\n",
+    "    df_Kaggle = fill_na(df_Kaggle)\n",
+    "    df_Kaggle = add_features(df_Kaggle)\n",
+    "    \n",
+    "    #df_Kaggle = Bayessian_additions_for_Kaggle(df_Kaggle, df_new)\n",
+    "    \n",
+    "    options = [('driver_gk', 1), ('offer_class_group', 1), ('offer_class_group', 2), \n",
+    "               ('day_part', 2), ('ride_type_desc', 2), ('weekday_key', 2), ('cat_est_cost', 2)]\n",
+    "    for i in range(len(options)):\n",
+    "        d = Bayessian(df_new, options[i])\n",
+    "        if options[i][1] == 2:\n",
+    "            #new_values = df.apply(lambda row: d[row[options[i][0]]][row['driver_gk']], axis = 1)\n",
+    "            new_values = df_Kaggle.apply(lambda x: fun(d, x, options[i][0]), axis = 1)\n",
+    "            df_Kaggle['Proba_individual_' + str(options[i][0])] = new_values\n",
+    "        else:\n",
+    "            df_Kaggle['Prob_for_' + str(options[i][0])] = df_Kaggle[options[i][0]].map(d)\n",
+    "    \n",
+    "    df_Kaggle = add_pairs_bayess(df_Kaggle)\n",
+    "    df_Kaggle = prepare_DF(df_Kaggle)\n",
+    "    \n",
+    "    return df_Kaggle"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 330,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "def modify_train_sample(df):\n",
+    "    #Модификация трейна\n",
+    "    df[\"weekday_key\"] = df[\"weekday_key\"].astype('category')\n",
+    "    df = df.drop('driver_response', axis = 1)\n",
+    "    df = fill_na(df)\n",
+    "    df = add_features(df)\n",
+    "    \n",
+    "    options = [('driver_gk', 1), ('offer_class_group', 1), ('offer_class_group', 2), \n",
+    "               ('day_part', 2), ('ride_type_desc', 2), ('weekday_key', 2), ('cat_est_cost', 2)]\n",
+    "    for i in range(len(options)):\n",
+    "        d = Bayessian(df, options[i])\n",
+    "        if options[i][1] == 2:\n",
+    "            new_values = df.apply(lambda row: d[row[options[i][0]]][row['driver_gk']], axis = 1)\n",
+    "            df['Proba_individual_' + str(options[i][0])] = new_values\n",
+    "        else:\n",
+    "            df['Prob_for_' + str(options[i][0])] = df[options[i][0]].map(d)\n",
+    "\n",
+    "    df = add_pairs_bayess(df)\n",
+    "    df = prepare_DF(df)\n",
+    "    \n",
+    "    return df"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 394,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "df = pd.read_csv('CAX_TrainingData_McK.csv')\n",
+    "df_Kaggle = pd.read_csv('CAX_TestData_McK.csv')\n",
+    "\n",
+    "Y = df['driver_response']"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 395,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "247.265246\n"
+     ]
+    },
+    {
+     "data": {
+      "text/plain": [
+       "(892557, 52)"
+      ]
+     },
+     "execution_count": 395,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "start = time.clock()\n",
+    "df_try = modify_train_sample(df)\n",
+    "print time.clock() - start\n",
+    "df_try.shape"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 396,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "79.056239\n"
+     ]
+    }
+   ],
+   "source": [
+    "start = time.clock()\n",
+    "df_Kaggle = modify_test_sample(df_Kaggle)\n",
+    "print time.clock()-start"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 402,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "df_last = df_try\n",
+    "df_Kaggle_last = df_Kaggle"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 403,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "#df_Kaggle.head()\n",
+    "df_try = df_try[cols_max]\n",
+    "df_Kaggle_X = df_Kaggle[cols_max]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 405,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "X_train, X_test, Y_train, Y_test = train_test_split(df_try, Y, test_size=0.3, random_state=152)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 406,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>pair_class_and_day_week</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>395634</th>\n",
+       "      <td>0.169154</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>274897</th>\n",
+       "      <td>0.022112</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>730063</th>\n",
+       "      <td>0.666667</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>355967</th>\n",
+       "      <td>0.742857</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>288371</th>\n",
+       "      <td>0.004902</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "        pair_class_and_day_week\n",
+       "395634                 0.169154\n",
+       "274897                 0.022112\n",
+       "730063                 0.666667\n",
+       "355967                 0.742857\n",
+       "288371                 0.004902"
+      ]
+     },
+     "execution_count": 406,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "X_train.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 407,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "LogisticRegression(C=1.0, class_weight=None, dual=False, fit_intercept=True,\n",
+       "          intercept_scaling=1, max_iter=100, multi_class='ovr', n_jobs=1,\n",
+       "          penalty='l2', random_state=14, solver='liblinear', tol=0.0001,\n",
+       "          verbose=0, warm_start=False)"
+      ]
+     },
+     "execution_count": 407,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "from sklearn.linear_model import LogisticRegression\n",
+    "LR = LogisticRegression(random_state=14)\n",
+    "LR.fit(X_train, Y_train)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 408,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "0.884715013709\n",
+      "0.884199345049\n"
+     ]
+    }
+   ],
+   "source": [
+    "#!!!!!!!\n",
+    "print roc_auc_score(Y_train, LR.predict_proba(X_train)[:, 1])\n",
+    "print roc_auc_score(Y_test, LR.predict_proba(X_test)[:, 1])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 409,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "final = LR.predict_proba(df_Kaggle_X)[:, 1]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 410,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "score = pd.DataFrame(final)\n",
+    "df_new = pd.read_csv('CAX_TestData_McK.csv')\n",
+    "df_new = df_new['offer_gk']\n",
+    "score.rename(columns={0:'driver_response'}, inplace=True)\n",
+    "ans = pd.concat([df_new, score], axis=1)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 411,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "ans.to_csv('3.csv')\n",
+    "a=7"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 418,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "df_new = pd.read_csv('CAX_TestData_McK.csv')\n",
+    "df_new = df_new['offer_gk']\n",
+    "score = pd.DataFrame(np.zeros(len(df_new)) + 0.5)\n",
+    "q = pd.concat([df_new, score], axis=1)\n",
+    "q.to_csv('randompredict.csv')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 363,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "0.88011712284189159"
+      ]
+     },
+     "execution_count": 363,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "cross_val_score(LogisticRegression(), X_train, Y_train, scoring='roc_auc').mean()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 367,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "0.88650637840401725"
+      ]
+     },
+     "execution_count": 367,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "X_data_kbest = SelectKBest(f_classif, k=5).fit_transform(X_train, Y_train)\n",
+    "cross_val_score(LogisticRegression(), X_data_kbest, Y_train, scoring='roc_auc').mean()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 398,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "from sklearn.ensemble import ExtraTreesClassifier\n",
+    "from sklearn.feature_selection import SelectFromModel\n",
+    "clf = ExtraTreesClassifier(n_estimators=200)\n",
+    "clf = clf.fit(X_train[:20000], Y_train[:20000])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 399,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "features = pd.DataFrame()\n",
+    "features['feature'] = X_train.columns\n",
+    "features['importance'] = clf.feature_importances_"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 401,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "['pair_class_and_day_week']"
+      ]
+     },
+     "execution_count": 401,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "cols_max = list(features.sort_values(['importance'],ascending=False)['feature'][:1])\n",
+    "cols_max"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 368,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "ename": "ValueError",
+     "evalue": "max_features must be in (0, n_features]",
+     "output_type": "error",
+     "traceback": [
+      "\u001b[0;31m---------------------------------------------------------------------------\u001b[0m",
+      "\u001b[0;31mValueError\u001b[0m                                Traceback (most recent call last)",
+      "\u001b[0;32m<ipython-input-368-7b12bf51d9d1>\u001b[0m in \u001b[0;36m<module>\u001b[0;34m()\u001b[0m\n\u001b[1;32m      1\u001b[0m \u001b[0mforest\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mRandomForestClassifier\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mrandom_state\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0;36m1\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mwarm_start\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0mTrue\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mn_estimators\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0;36m25\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mmax_features\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0;36m11\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mmax_depth\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0;36m26\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mmin_samples_leaf\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0;36m3\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m----> 2\u001b[0;31m \u001b[0mforest\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mfit\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mX_data_kbest\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mY_train\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m",
+      "\u001b[0;32m//anaconda/lib/python2.7/site-packages/sklearn/ensemble/forest.pyc\u001b[0m in \u001b[0;36mfit\u001b[0;34m(self, X, y, sample_weight)\u001b[0m\n\u001b[1;32m    326\u001b[0m                     \u001b[0mt\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mself\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mX\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0my\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0msample_weight\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mi\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mlen\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mtrees\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m,\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    327\u001b[0m                     verbose=self.verbose, class_weight=self.class_weight)\n\u001b[0;32m--> 328\u001b[0;31m                 for i, t in enumerate(trees))\n\u001b[0m\u001b[1;32m    329\u001b[0m \u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    330\u001b[0m             \u001b[0;31m# Collect newly grown trees\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n",
+      "\u001b[0;32m//anaconda/lib/python2.7/site-packages/sklearn/externals/joblib/parallel.pyc\u001b[0m in \u001b[0;36m__call__\u001b[0;34m(self, iterable)\u001b[0m\n\u001b[1;32m    777\u001b[0m             \u001b[0;31m# was dispatched. In particular this covers the edge\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    778\u001b[0m             \u001b[0;31m# case of Parallel used with an exhausted iterator.\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m--> 779\u001b[0;31m             \u001b[0;32mwhile\u001b[0m \u001b[0mself\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mdispatch_one_batch\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0miterator\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m\u001b[1;32m    780\u001b[0m                 \u001b[0mself\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0m_iterating\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mTrue\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    781\u001b[0m             \u001b[0;32melse\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n",
+      "\u001b[0;32m//anaconda/lib/python2.7/site-packages/sklearn/externals/joblib/parallel.pyc\u001b[0m in \u001b[0;36mdispatch_one_batch\u001b[0;34m(self, iterator)\u001b[0m\n\u001b[1;32m    623\u001b[0m                 \u001b[0;32mreturn\u001b[0m \u001b[0mFalse\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    624\u001b[0m             \u001b[0;32melse\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m--> 625\u001b[0;31m                 \u001b[0mself\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0m_dispatch\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mtasks\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m\u001b[1;32m    626\u001b[0m                 \u001b[0;32mreturn\u001b[0m \u001b[0mTrue\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    627\u001b[0m \u001b[0;34m\u001b[0m\u001b[0m\n",
+      "\u001b[0;32m//anaconda/lib/python2.7/site-packages/sklearn/externals/joblib/parallel.pyc\u001b[0m in \u001b[0;36m_dispatch\u001b[0;34m(self, batch)\u001b[0m\n\u001b[1;32m    586\u001b[0m         \u001b[0mdispatch_timestamp\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mtime\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mtime\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    587\u001b[0m         \u001b[0mcb\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mBatchCompletionCallBack\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mdispatch_timestamp\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mlen\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mbatch\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mself\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m--> 588\u001b[0;31m         \u001b[0mjob\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mself\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0m_backend\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mapply_async\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mbatch\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mcallback\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0mcb\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m\u001b[1;32m    589\u001b[0m         \u001b[0mself\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0m_jobs\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mappend\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mjob\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    590\u001b[0m \u001b[0;34m\u001b[0m\u001b[0m\n",
+      "\u001b[0;32m//anaconda/lib/python2.7/site-packages/sklearn/externals/joblib/_parallel_backends.pyc\u001b[0m in \u001b[0;36mapply_async\u001b[0;34m(self, func, callback)\u001b[0m\n\u001b[1;32m    109\u001b[0m     \u001b[0;32mdef\u001b[0m \u001b[0mapply_async\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mself\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mfunc\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mcallback\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0mNone\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    110\u001b[0m         \u001b[0;34m\"\"\"Schedule a func to be run\"\"\"\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m--> 111\u001b[0;31m         \u001b[0mresult\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mImmediateResult\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mfunc\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m\u001b[1;32m    112\u001b[0m         \u001b[0;32mif\u001b[0m \u001b[0mcallback\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    113\u001b[0m             \u001b[0mcallback\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mresult\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n",
+      "\u001b[0;32m//anaconda/lib/python2.7/site-packages/sklearn/externals/joblib/_parallel_backends.pyc\u001b[0m in \u001b[0;36m__init__\u001b[0;34m(self, batch)\u001b[0m\n\u001b[1;32m    330\u001b[0m         \u001b[0;31m# Don't delay the application, to avoid keeping the input\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    331\u001b[0m         \u001b[0;31m# arguments in memory\u001b[0m\u001b[0;34m\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m--> 332\u001b[0;31m         \u001b[0mself\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mresults\u001b[0m \u001b[0;34m=\u001b[0m \u001b[0mbatch\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m\u001b[1;32m    333\u001b[0m \u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    334\u001b[0m     \u001b[0;32mdef\u001b[0m \u001b[0mget\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mself\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n",
+      "\u001b[0;32m//anaconda/lib/python2.7/site-packages/sklearn/externals/joblib/parallel.pyc\u001b[0m in \u001b[0;36m__call__\u001b[0;34m(self)\u001b[0m\n\u001b[1;32m    129\u001b[0m \u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    130\u001b[0m     \u001b[0;32mdef\u001b[0m \u001b[0m__call__\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mself\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m--> 131\u001b[0;31m         \u001b[0;32mreturn\u001b[0m \u001b[0;34m[\u001b[0m\u001b[0mfunc\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0;34m*\u001b[0m\u001b[0margs\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0;34m**\u001b[0m\u001b[0mkwargs\u001b[0m\u001b[0;34m)\u001b[0m \u001b[0;32mfor\u001b[0m \u001b[0mfunc\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0margs\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mkwargs\u001b[0m \u001b[0;32min\u001b[0m \u001b[0mself\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mitems\u001b[0m\u001b[0;34m]\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m\u001b[1;32m    132\u001b[0m \u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    133\u001b[0m     \u001b[0;32mdef\u001b[0m \u001b[0m__len__\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mself\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n",
+      "\u001b[0;32m//anaconda/lib/python2.7/site-packages/sklearn/ensemble/forest.pyc\u001b[0m in \u001b[0;36m_parallel_build_trees\u001b[0;34m(tree, forest, X, y, sample_weight, tree_idx, n_trees, verbose, class_weight)\u001b[0m\n\u001b[1;32m    119\u001b[0m             \u001b[0mcurr_sample_weight\u001b[0m \u001b[0;34m*=\u001b[0m \u001b[0mcompute_sample_weight\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0;34m'balanced'\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0my\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mindices\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    120\u001b[0m \u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m--> 121\u001b[0;31m         \u001b[0mtree\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mfit\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mX\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0my\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0msample_weight\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0mcurr_sample_weight\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mcheck_input\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0mFalse\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m\u001b[1;32m    122\u001b[0m     \u001b[0;32melse\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    123\u001b[0m         \u001b[0mtree\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mfit\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mX\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0my\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0msample_weight\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0msample_weight\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mcheck_input\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0mFalse\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n",
+      "\u001b[0;32m//anaconda/lib/python2.7/site-packages/sklearn/tree/tree.pyc\u001b[0m in \u001b[0;36mfit\u001b[0;34m(self, X, y, sample_weight, check_input, X_idx_sorted)\u001b[0m\n\u001b[1;32m    788\u001b[0m             \u001b[0msample_weight\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0msample_weight\u001b[0m\u001b[0;34m,\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    789\u001b[0m             \u001b[0mcheck_input\u001b[0m\u001b[0;34m=\u001b[0m\u001b[0mcheck_input\u001b[0m\u001b[0;34m,\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m--> 790\u001b[0;31m             X_idx_sorted=X_idx_sorted)\n\u001b[0m\u001b[1;32m    791\u001b[0m         \u001b[0;32mreturn\u001b[0m \u001b[0mself\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    792\u001b[0m \u001b[0;34m\u001b[0m\u001b[0m\n",
+      "\u001b[0;32m//anaconda/lib/python2.7/site-packages/sklearn/tree/tree.pyc\u001b[0m in \u001b[0;36mfit\u001b[0;34m(self, X, y, sample_weight, check_input, X_idx_sorted)\u001b[0m\n\u001b[1;32m    240\u001b[0m             \u001b[0;32mraise\u001b[0m \u001b[0mValueError\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0;34m\"max_depth must be greater than zero. \"\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    241\u001b[0m         \u001b[0;32mif\u001b[0m \u001b[0;32mnot\u001b[0m \u001b[0;34m(\u001b[0m\u001b[0;36m0\u001b[0m \u001b[0;34m<\u001b[0m \u001b[0mmax_features\u001b[0m \u001b[0;34m<=\u001b[0m \u001b[0mself\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mn_features_\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0;32m--> 242\u001b[0;31m             \u001b[0;32mraise\u001b[0m \u001b[0mValueError\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0;34m\"max_features must be in (0, n_features]\"\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[0m\u001b[1;32m    243\u001b[0m         \u001b[0;32mif\u001b[0m \u001b[0;32mnot\u001b[0m \u001b[0misinstance\u001b[0m\u001b[0;34m(\u001b[0m\u001b[0mmax_leaf_nodes\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0;34m(\u001b[0m\u001b[0mnumbers\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0mIntegral\u001b[0m\u001b[0;34m,\u001b[0m \u001b[0mnp\u001b[0m\u001b[0;34m.\u001b[0m\u001b[0minteger\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m)\u001b[0m\u001b[0;34m:\u001b[0m\u001b[0;34m\u001b[0m\u001b[0m\n\u001b[1;32m    244\u001b[0m             raise ValueError(\"max_leaf_nodes must be integral number but was \"\n",
+      "\u001b[0;31mValueError\u001b[0m: max_features must be in (0, n_features]"
+     ]
+    }
+   ],
+   "source": [
+    "forest = RandomForestClassifier(random_state=1, warm_start=True, n_estimators=25, max_features=11, max_depth=26, min_samples_leaf=3)\n",
+    "forest.fit(X_data_kbest, Y_train)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 388,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "RandomForestClassifier(bootstrap=True, class_weight=None, criterion='gini',\n",
+       "            max_depth=None, max_features='auto', max_leaf_nodes=None,\n",
+       "            min_impurity_decrease=0.0, min_impurity_split=None,\n",
+       "            min_samples_leaf=1, min_samples_split=2,\n",
+       "            min_weight_fraction_leaf=0.0, n_estimators=10, n_jobs=1,\n",
+       "            oob_score=False, random_state=None, verbose=0,\n",
+       "            warm_start=False)"
+      ]
+     },
+     "execution_count": 388,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "RF = RandomForestClassifier()\n",
+    "RF.fit(X_train, Y_train)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 389,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "0.950466726215\n",
+      "0.837537320394\n"
+     ]
+    }
+   ],
+   "source": [
+    "#!!!!!!!\n",
+    "print roc_auc_score(Y_train, RF.predict_proba(X_train)[:, 1])\n",
+    "print roc_auc_score(Y_test, RF.predict_proba(X_test)[:, 1])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 390,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "final = RF.predict_proba(df_Kaggle_X)[:, 1]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 391,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "array([ 0.59333333,  0.87857143,  1.        , ...,  0.83547619,\n",
+       "        1.        ,  1.        ])"
+      ]
+     },
+     "execution_count": 391,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "final"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 165,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "GradientBoostingClassifier(criterion='friedman_mse', init=None,\n",
+       "              learning_rate=0.5, loss='deviance', max_depth=3,\n",
+       "              max_features=15, max_leaf_nodes=None,\n",
+       "              min_impurity_decrease=0.0, min_impurity_split=None,\n",
+       "              min_samples_leaf=7, min_samples_split=2,\n",
+       "              min_weight_fraction_leaf=0.0, n_estimators=7, presort='auto',\n",
+       "              random_state=1, subsample=1.0, verbose=0, warm_start=True)"
+      ]
+     },
+     "execution_count": 165,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "from sklearn.ensemble import GradientBoostingClassifier\n",
+    "gb = GradientBoostingClassifier(random_state=1, warm_start=True, n_estimators=7, learning_rate=0.5, max_depth=3, max_features=15, min_samples_leaf=7)\n",
+    "gb.fit(X_train, Y_train)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 166,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "0.895877475982\n",
+      "0.894711601998\n"
+     ]
+    }
+   ],
+   "source": [
+    "#!!!!!!!\n",
+    "print roc_auc_score(Y_train, gb.predict_proba(X_train)[:, 1])\n",
+    "print roc_auc_score(Y_test, gb.predict_proba(X_test)[:, 1])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 167,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "final = gb.predict_proba(df_Kaggle_X)[:, 1]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "anaconda-cloud": {},
+  "kernelspec": {
+   "display_name": "Python [conda root]",
+   "language": "python",
+   "name": "conda-root-py"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 2
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython2",
+   "version": "2.7.12"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 1
+}
